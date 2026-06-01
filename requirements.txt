@@ -39,4 +39,3 @@ qrcode[pil]
 croniter
 pytest
 pytest-asyncio
-respx

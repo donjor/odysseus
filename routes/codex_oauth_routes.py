@@ -350,47 +350,4 @@ def setup_codex_oauth_routes() -> APIRouter:
             db.close()
         return {"ok": True}
 
-    @router.post("/import-cli")
-    def import_cli(request: Request, name: str = DEFAULT_ENDPOINT_NAME):
-        """Fast-path: adopt tokens from a local `~/.codex/auth.json` (if the host
-        is already logged into the Codex CLI). Bypasses the device-code flow."""
-        owner = _owner(request)
-        token_set = _read_codex_cli_tokens()
-        endpoint_id = str(uuid.uuid4())[:8]
-        db = SessionLocal()
-        try:
-            db.add(ModelEndpoint(
-                id=endpoint_id, name=name.strip() or DEFAULT_ENDPOINT_NAME,
-                base_url=cx.BASE_URL, api_key=None, is_enabled=True,
-                model_type="llm", cached_models=json.dumps(CODEX_MODELS), owner=owner,
-            ))
-            db.commit()
-        finally:
-            db.close()
-        persist_tokens(endpoint_id, token_set, owner=owner,
-                       provider_id=PROVIDER_ID, create_if_missing=True)
-        return {"endpoint_id": endpoint_id, "status": "active"}
-
     return router
-
-
-def _read_codex_cli_tokens() -> cx.TokenSet:
-    """Read tokens from `~/.codex/auth.json`. Never logs token material."""
-    from pathlib import Path
-    path = Path.home() / ".codex" / "auth.json"
-    if not path.exists():
-        raise HTTPException(404, "No local Codex CLI login found (~/.codex/auth.json).")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        tokens = data.get("tokens") or {}
-        access = (tokens.get("access_token") or "").strip()
-        refresh = (tokens.get("refresh_token") or "").strip()
-    except Exception:
-        raise HTTPException(400, "Could not read ~/.codex/auth.json.")
-    if not access or not refresh:
-        raise HTTPException(400, "~/.codex/auth.json is missing access/refresh tokens.")
-    account_id = (tokens.get("account_id") or "").strip() or cx.extract_account_id(access)
-    return cx.TokenSet(
-        access_token=access, refresh_token=refresh,
-        account_id=account_id, expires_at=cx.access_token_expiry(access),
-    )

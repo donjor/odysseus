@@ -11,7 +11,6 @@
 //   POST  /connect/{attempt_id}/cancel
 //   GET   /status                   -> {connected:[...], pending:[...]}
 //   POST  /disconnect/{endpoint_id}
-//   POST  /import-cli               -> {endpoint_id, status}
 
 import uiModule from './ui.js';
 
@@ -74,7 +73,6 @@ function renderIdle() {
   flow.innerHTML = `
     <div class="codex-actions">
       <button class="admin-btn-add" data-codex-action="connect">Connect ChatGPT</button>
-      <button class="admin-btn-sm" data-codex-action="import" title="Adopt an existing Codex CLI login on this host (~/.codex/auth.json)">Import from Codex CLI</button>
     </div>`;
 }
 
@@ -189,20 +187,6 @@ async function startConnect(btn) {
   }
 }
 
-async function importCli(btn) {
-  clearMsg();
-  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
-  try {
-    await api('/import-cli', { method: 'POST' });
-    setMsg('Imported ChatGPT login from the Codex CLI on this host.', 'ok');
-    loadStatus();
-  } catch (e) {
-    setMsg(esc(e.message), 'warn');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Import from Codex CLI'; }
-  }
-}
-
 async function cancelAttempt() {
   if (!attempt) { renderIdle(); return; }
   const id = attempt.id;
@@ -297,7 +281,6 @@ export function initCodexConnect() {
     e.preventDefault();
     switch (action) {
       case 'connect': startConnect(t); break;
-      case 'import': importCli(t); break;
       case 'cancel': cancelAttempt(); break;
       case 'copy': copyCode(t); break;
       case 'disconnect': disconnect(t.dataset.ep, t); break;
