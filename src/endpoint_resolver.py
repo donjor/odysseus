@@ -418,6 +418,7 @@ def resolve_vision_fallback_candidates() -> list:
 
 
 def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) -> list:
+    from src.providers import registry
     out = []
     try:
         from src.settings import get_user_setting, load_settings
@@ -429,6 +430,13 @@ def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) 
         if not isinstance(entry, dict):
             continue
         resolved = resolve_endpoint_by_id(entry.get("endpoint_id", ""), entry.get("model", ""))
-        if resolved:
-            out.append(resolved)
+        if not resolved:
+            continue
+        # OAuth providers (e.g. codex / ChatGPT-subscription) cannot serve as
+        # fallback targets: a fallback candidate carries no endpoint identity, so
+        # its per-call OAuth token can't be resolved/refreshed. Keep fallbacks
+        # static-only (mirrors the primary-only ref threading in chat/agent paths).
+        if registry.detect_spec(resolved[0]).auth_type == "oauth":
+            continue
+        out.append(resolved)
     return out
