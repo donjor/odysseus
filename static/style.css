@@ -13389,6 +13389,79 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   color: var(--accent-primary, var(--accent, var(--red)));
 }
 
+/* ─── Connect ChatGPT (Codex / OAuth) card ─────────────────────────────── */
+.codex-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.codex-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.codex-account:last-child { border-bottom: none; }
+.codex-account-name { font-size: 12px; font-weight: 600; }
+.codex-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 30%, transparent);
+  flex: 0 0 auto;
+}
+.codex-dot-on { background: #2ecc71; box-shadow: 0 0 5px #2ecc71; }
+.codex-state {
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+.codex-state-ok { color: #2ecc71; }
+.codex-state-err { color: var(--red); cursor: help; }
+.codex-disc { margin-left: auto; }
+.codex-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0 2px;
+}
+.codex-step {
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  margin-top: 4px;
+}
+.codex-open-btn { align-self: flex-start; text-decoration: none; }
+.codex-code-row { display: flex; align-items: center; gap: 8px; }
+.codex-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  user-select: all;
+}
+.codex-wait {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  margin-top: 2px;
+}
+.codex-msg {
+  font-size: 11.5px;
+  margin-top: 8px;
+  min-height: 1px;
+}
+.codex-msg-ok { color: #2ecc71; }
+.codex-msg-warn { color: #e0a93b; }
+.codex-msg-err { color: var(--red); }
+
 /* RAG upload zone */
 .admin-rag-upload-zone {
   border: 2px dashed var(--border);

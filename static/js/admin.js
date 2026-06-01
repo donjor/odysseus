@@ -4,6 +4,7 @@
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { providerLogo } from './providers.js';
+import { initCodexConnect, refreshCodexStatus } from './codexConnect.js';
 
 let initialized = false;
 let modalEl = null;
@@ -1798,7 +1799,7 @@ function initDangerZone() {
    ═══════════════════════════════════════════ */
 function initAll() {
   modalEl = el('settings-modal');
-  const inits = [initSignupToggle, initAddUser, initEndpointForm, initMcpForm, initCalDAV, initBackup, initDangerZone, () => settingsModule.initIntegrations()];
+  const inits = [initSignupToggle, initAddUser, initEndpointForm, initMcpForm, initCalDAV, initBackup, initDangerZone, () => settingsModule.initIntegrations(), initCodexConnect];
   for (const fn of inits) {
     try { fn(); } catch (e) { console.error('Admin init error in', fn.name || 'anonymous', e); }
   }
@@ -1811,6 +1812,7 @@ function refreshAll() {
   loadEndpoints();
   loadBuiltinTools();
   loadMcpServers();
+  refreshCodexStatus();
 }
 
 /* ═══════════════════════════════════════════
