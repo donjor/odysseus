@@ -43,9 +43,10 @@ async def resolve(ref: EndpointRef, spec: Optional[ProviderSpec] = None) -> Cred
     """Async credential resolution. Static-key today; OAuth refresh lands here."""
     _guard_oauth(ref, spec)
     if _effective_auth_type(ref, spec) == "oauth":
-        # PR2: look up the token by ref.endpoint_id, refresh if expired, build
-        # the provider's auth headers (single-flight per endpoint).
-        raise HTTPException(501, "OAuth credential resolution is not implemented yet")
+        # Look up the token by ref.endpoint_id, refresh on expiry (single-flight
+        # per endpoint), and build the bearer + account-id headers.
+        from src.providers.auth import oauth_store  # lazy: avoids import cycle
+        return await oauth_store.resolve_oauth_credential(ref, spec)
     from src.providers.auth import static  # lazy: avoids auth-package import cycle
     return static.resolve(ref)
 
