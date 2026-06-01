@@ -632,6 +632,21 @@ export function applyModelColor(roleEl, modelName) {
       setTimeout(() => document.addEventListener('click', closePopup, true), 0);
     });
   }
+  // Subscription marker — a small "(sub)" right after the model name, for
+  // flat-rate (e.g. ChatGPT-sub) endpoints. Folded in here because every role
+  // render (streaming, agent, group, history rebuild) calls applyModelColor —
+  // this is the one shared chokepoint, so the marker can't drift per-path.
+  // Insert before any inline timestamp; idempotent against repeated calls.
+  if (!roleEl.querySelector('.model-sub-inline')
+      && window.modelsModule && window.modelsModule.isSubscriptionModel
+      && window.modelsModule.isSubscriptionModel(modelName, '')) {
+    const tag = document.createElement('span');
+    tag.className = 'model-sub-inline';
+    tag.textContent = '(sub)';
+    const ts = roleEl.querySelector('.role-timestamp');
+    if (ts) roleEl.insertBefore(tag, ts);
+    else roleEl.appendChild(tag);
+  }
 }
 
 export function getModelCost(modelName, inputTokens, outputTokens) {
@@ -1866,21 +1881,6 @@ export function displayMetrics(messageElement, metrics) {
 /**
  * Add a message to the chat history.
  */
-/**
- * Append a small "(sub)" marker to a role element when the model is served by
- * a flat-rate subscription endpoint. Mirrors the model-picker marker so the
- * subscription signal reads the same in the picker and inline in chat.
- */
-function appendSubTag(roleEl, model, url) {
-  if (!roleEl || !model) return;
-  const m = window.modelsModule;
-  if (!m || !m.isSubscriptionModel || !m.isSubscriptionModel(model, url || '')) return;
-  const tag = document.createElement('span');
-  tag.className = 'model-sub-inline';
-  tag.textContent = '(sub)';
-  roleEl.appendChild(tag);
-}
-
 export function addMessage(role, content, modelName, metadata) {
   try {
     hideWelcomeScreen();
@@ -1919,7 +1919,6 @@ export function addMessage(role, content, modelName, metadata) {
           const contModel = modelName || metadata?.model;
           roleEl.textContent = shortModel(contModel);
           applyModelColor(roleEl, contModel);
-          appendSubTag(roleEl, contModel, metadata?.endpoint_url);
           if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
           const body = document.createElement('div');
@@ -2029,10 +2028,7 @@ export function addMessage(role, content, modelName, metadata) {
     }
     r.textContent = _roleText;
     if (role !== 'user') {
-      if (!isSlash && !isCompacted) {
-        applyModelColor(r, resolvedModel);
-        appendSubTag(r, resolvedModel, metadata?.endpoint_url);
-      }
+      if (!isSlash && !isCompacted) applyModelColor(r, resolvedModel);
       r.appendChild(roleTimestamp(metadata?.timestamp));
     }
 
