@@ -22,7 +22,7 @@ import base64
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -156,8 +156,7 @@ def access_token_is_expiring(access_token: Any, skew_seconds: int = REFRESH_SKEW
     return expiry <= _utcnow_naive() + _timedelta(skew_seconds)
 
 
-def _timedelta(seconds: int):
-    from datetime import timedelta
+def _timedelta(seconds: int) -> timedelta:
     return timedelta(seconds=max(0, int(seconds)))
 
 

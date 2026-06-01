@@ -26,14 +26,14 @@ from core.database import CodexLoginAttempt, EndpointOAuthToken, ModelEndpoint, 
 from src.auth_helpers import require_user
 from src.providers.auth import codex_oauth as cx
 from src.providers.auth.oauth_store import persist_tokens
+# Curated model list (the codex backend has no chat-compatible /models probe);
+# owned by the provider spec, applied to the endpoint on connect.
+from src.providers.spec import CODEX_MODELS
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_ID = "openai-codex"
 DEFAULT_ENDPOINT_NAME = "ChatGPT (Codex)"
-# Curated model list (the codex backend has no chat-compatible /models probe).
-# Owned by the provider spec; imported here so the endpoint is usable on connect.
-from src.providers.spec import CODEX_MODELS
 
 # Keep strong refs to in-flight poll tasks so they aren't GC'd mid-flight.
 _BG_TASKS: set[asyncio.Task] = set()
