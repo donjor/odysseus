@@ -165,3 +165,38 @@ class TestOptionalRefParam:
         assert str(req.url) == OPENAI_URL
         assert req.headers["authorization"] == "Bearer sk-ref"
         assert json.loads(req.content)["model"] == "gpt-4o"
+
+
+class TestFallbackRejectsRef:
+    """Buddy-review catch: a `ref=` must never reach a fallback wrapper. The
+    wrappers forward **kwargs to a per-candidate entry call, so a single ref
+    would supersede EVERY candidate's (url, model, headers) and silently
+    collapse the chain onto one endpoint. Guarded with a TypeError until PR2
+    lets candidates themselves be EndpointRefs. No current caller passes ref=,
+    so this is purely defensive — it can never fire on today's call sites."""
+
+    MSGS = [{"role": "user", "content": "hi"}]
+    CANDS = [(OPENAI_URL, "gpt-4o", {}), ("http://fallback/v1/chat/completions", "m2", {})]
+
+    def test_sync_fallback_rejects_ref(self):
+        ref = EndpointRef.from_legacy(OPENAI_URL, "gpt-4o", {})
+        with pytest.raises(TypeError, match="does not accept ref="):
+            llm_core.llm_call_with_fallback(self.CANDS, self.MSGS, ref=ref)
+
+    async def test_async_fallback_rejects_ref(self):
+        ref = EndpointRef.from_legacy(OPENAI_URL, "gpt-4o", {})
+        with pytest.raises(TypeError, match="does not accept ref="):
+            await llm_core.llm_call_async_with_fallback(self.CANDS, self.MSGS, ref=ref)
+
+    async def test_stream_fallback_rejects_ref(self):
+        ref = EndpointRef.from_legacy(OPENAI_URL, "gpt-4o", {})
+        with pytest.raises(TypeError, match="does not accept ref="):
+            async for _ in llm_core.stream_llm_with_fallback(self.CANDS, self.MSGS, ref=ref):
+                pass
+
+    @respx.mock
+    def test_sync_fallback_without_ref_still_works(self):
+        # Guard must not disturb the normal (no-ref) fallback path.
+        respx.post(OPENAI_URL).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}))
+        out = llm_core.llm_call_with_fallback(self.CANDS, self.MSGS)
+        assert out == "ok"

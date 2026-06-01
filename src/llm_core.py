@@ -303,6 +303,19 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
 
 
+def _reject_ref_kwarg(fn_name: str, kwargs: Dict) -> None:
+    """Fallback wrappers forward **kwargs to a per-candidate entry call. A `ref`
+    in there would supersede EVERY candidate's (url, model, headers) and collapse
+    the whole chain onto one endpoint — silently defeating fallback. Each
+    candidate already carries its own identity, so reject `ref` outright. (PR2
+    will let candidates BE EndpointRefs; until then this is unreachable misuse.)"""
+    if "ref" in kwargs:
+        raise TypeError(
+            f"{fn_name}() does not accept ref=; each candidate carries its own "
+            f"endpoint identity (url, model, headers)"
+        )
+
+
 def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
     """Sync `llm_call` with an ordered fallback chain.
 
@@ -311,6 +324,7 @@ def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
     the next candidate. The dead-host cooldown inside `llm_call` makes repeat
     attempts at an offline primary effectively free.
     """
+    _reject_ref_kwarg("llm_call_with_fallback", kwargs)
     cands = [c for c in (candidates or []) if c and c[0] and c[1]]
     if not cands:
         raise HTTPException(503, "No model endpoint configured")
@@ -328,6 +342,7 @@ def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
 
 async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
     """Async variant of `llm_call_with_fallback` — same semantics."""
+    _reject_ref_kwarg("llm_call_async_with_fallback", kwargs)
     cands = [c for c in (candidates or []) if c and c[0] and c[1]]
     if not cands:
         raise HTTPException(503, "No model endpoint configured")
@@ -504,6 +519,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
 
     Yields the same SSE chunk protocol as stream_llm.
     """
+    _reject_ref_kwarg("stream_llm_with_fallback", kwargs)
     cands = [c for c in (candidates or []) if c and c[0] and c[1]]
     if not cands:
         yield f'event: error\ndata: {json.dumps({"error": "No model endpoint configured", "status": 503})}\n\n'
