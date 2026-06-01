@@ -181,8 +181,9 @@ class TestBuildPayload:
         assert p["tools"] == [{"type": "function", "name": "foo", "description": "d",
                                "parameters": {"type": "object"}, "strict": None}]
 
-    def test_temperature_included_when_set(self):
-        assert T.build_payload("gpt-5.4", self._msgs(), 0.55, 0)["temperature"] == 0.55
+    def test_omits_temperature(self):
+        # codex Responses rejects temperature (reasoning models) — mirror max_tokens.
+        assert "temperature" not in T.build_payload("gpt-5.4", self._msgs(), 0.55, 0)
 
     def test_no_system_no_instructions(self):
         p = T.build_payload("gpt-5.4", [{"role": "user", "content": "hi"}], 0.7, 0)

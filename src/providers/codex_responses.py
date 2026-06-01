@@ -19,7 +19,9 @@ Boundaries (kept deliberately, per PR2 plan):
     encrypted reasoning is NOT persisted/echoed across turns in PR2 (Odysseus stores
     plain chat history). That costs cross-turn reasoning-cache affinity, not
     correctness. Reasoning round-trip + WebSocket transport are deferred to PR3.
-  - `max_tokens` is intentionally OMITTED — the codex Responses backend rejects it.
+  - `max_tokens` and `temperature` are intentionally OMITTED — the codex Responses
+    backend rejects both ("Unsupported parameter"). Reasoning models are governed by
+    reasoning effort, not temperature. Mirrors pi / Hermes / opencode.
 """
 import json
 import logging
@@ -309,11 +311,11 @@ class CodexResponsesTransport:
         }
         if instructions:
             payload["instructions"] = instructions
-        if temperature is not None:
-            payload["temperature"] = temperature
         if tools:
             payload["tools"] = _convert_tools(tools)
-        # max_tokens is intentionally omitted — the codex backend rejects it.
+        # temperature + max_tokens are intentionally omitted — the codex Responses
+        # backend rejects both ("Unsupported parameter"). Reasoning models use
+        # reasoning effort, not temperature; matches pi / Hermes / opencode.
         return payload
 
     def build_headers(self, headers: Optional[Dict]) -> Dict:
