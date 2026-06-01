@@ -72,6 +72,12 @@ class Session(TimestampMixin, Base):
     # Session metadata
     name = Column(String, nullable=False)
     endpoint_url = Column(String, nullable=False)
+    # Identity of the ModelEndpoint this session is bound to. Carried so OAuth
+    # (codex) endpoints can resolve + refresh their token per request — static
+    # API-key endpoints bake the key into `headers`, but an OAuth endpoint has no
+    # static key, so without the id its identity is lost. NULL = legacy row /
+    # endpoint not recorded (resolution falls back to URL+owner lookup).
+    endpoint_id = Column(String, nullable=True)
     model = Column(String, nullable=False)
     owner = Column(String, nullable=True, index=True)  # username; null = legacy/shared
     
@@ -330,6 +336,67 @@ class ModelEndpoint(TimestampMixin, Base):
     # is the historical default. When non-null, the model picker only shows
     # the endpoint to that user (admins always see everything).
     owner = Column(String, nullable=True, index=True)
+
+
+class EndpointOAuthToken(TimestampMixin, Base):
+    """OAuth credentials for a ChatGPT-subscription (codex) model endpoint.
+
+    One row per OAuth `ModelEndpoint` (1:1 via the unique `endpoint_id`). The
+    access + refresh tokens are Fernet-encrypted at rest (EncryptedText) — they
+    are bearer credentials to the user's ChatGPT subscription and must never sit
+    plaintext in the DB file, nor be logged. `account_id` (the JWT
+    `chatgpt_account_id` claim) is an identifier, not a secret, but is likewise
+    never logged. Refresh is single-flighted in `auth.resolve` keyed on
+    `endpoint_id`; `expires_at` drives refresh-on-expiry (120s skew).
+    """
+    __tablename__ = "endpoint_oauth_tokens"
+
+    id = Column(String, primary_key=True, index=True)
+    # 1:1 with the owning endpoint. CASCADE: deleting the endpoint drops its tokens.
+    endpoint_id = Column(String, ForeignKey("model_endpoints.id", ondelete="CASCADE"),
+                         nullable=False, unique=True, index=True)
+    # Owner-scoped: OAuth endpoints belong to the connecting user (NULL only for a
+    # deliberately-shared admin endpoint, which is not the default).
+    owner = Column(String, nullable=True, index=True)
+    provider_id = Column(String, nullable=False, default="openai-codex")
+    access_token = Column(EncryptedText, nullable=True)    # Bearer, encrypted at rest
+    refresh_token = Column(EncryptedText, nullable=True)   # rotated on refresh, encrypted at rest
+    account_id = Column(String, nullable=True)             # chatgpt_account_id (never logged)
+    expires_at = Column(DateTime, nullable=True)           # access-token expiry (UTC)
+    last_refresh_at = Column(DateTime, nullable=True)
+    # active | needs_relogin | quota | error  — surfaced to status endpoints (no token values)
+    status = Column(String, nullable=False, default="active")
+    last_error_redacted = Column(Text, nullable=True)      # redacted; never contains token material
+
+
+class CodexLoginAttempt(TimestampMixin, Base):
+    """In-flight device-code login attempt for a codex OAuth endpoint.
+
+    Created (PENDING) when a user starts `connect`; a background task polls
+    auth.openai.com until authorized/expired. `device_auth_id` (the device_code
+    poll secret) and `code_verifier` (PKCE) are Fernet-encrypted; `user_code` /
+    `verification_uri` are user-facing display values (not secret). Status
+    endpoints expose state only — never the encrypted fields.
+    """
+    __tablename__ = "codex_login_attempts"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    # The PENDING endpoint this attempt will activate once authorized. SET NULL
+    # (not CASCADE): an attempt is a log row, so cleaning up a failed pending
+    # endpoint must not erase the attempt's terminal status before the UI reads it.
+    endpoint_id = Column(String, ForeignKey("model_endpoints.id", ondelete="SET NULL"),
+                         nullable=True, index=True)
+    device_auth_id = Column(EncryptedText, nullable=True)  # device_code poll secret, encrypted
+    code_verifier = Column(EncryptedText, nullable=True)   # PKCE verifier, encrypted
+    user_code = Column(String, nullable=True)              # user-facing display code
+    verification_uri = Column(String, nullable=True)       # user-facing verification URL
+    # pending | authorized | expired | error | cancelled
+    status = Column(String, nullable=False, default="pending")
+    expires_at = Column(DateTime, nullable=True)
+    interval = Column(Integer, nullable=False, default=5)  # poll interval (seconds)
+    last_error_redacted = Column(Text, nullable=True)
+
 
 class McpServer(TimestampMixin, Base):
     """Admin-configured MCP (Model Context Protocol) tool servers."""
@@ -903,6 +970,29 @@ def _migrate_add_folder_column():
         conn.close()
     except Exception as e:
         logging.getLogger(__name__).warning(f"Migration check for folder failed: {e}")
+
+def _migrate_add_endpoint_id_column():
+    """Add endpoint_id column to sessions table if it doesn't exist.
+
+    Carries the bound endpoint's identity so OAuth (codex) sessions can resolve +
+    refresh their token per request. Existing rows get NULL (resolution falls back
+    to URL+owner lookup), so the migration is behavior-preserving for them.
+    """
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "endpoint_id" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN endpoint_id TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'endpoint_id' column to sessions")
+        conn.close()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration check for endpoint_id failed: {e}")
 
 def _migrate_add_token_columns():
     """Add cumulative token tracking columns to sessions table."""
@@ -1501,6 +1591,7 @@ def init_db():
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()
+    _migrate_add_endpoint_id_column()
     _migrate_add_token_columns()
     _migrate_add_mode_column()
     _migrate_add_multiuser_owner_columns()
