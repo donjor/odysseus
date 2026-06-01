@@ -822,6 +822,10 @@ def setup_model_routes(model_discovery):
             # Build correct URL based on provider
             chat_url = build_chat_url(base)
             category = _classify_endpoint(base)
+            # Flag OAuth/subscription endpoints (e.g. ChatGPT-sub via codex) so the
+            # UI can distinguish them from metered API-key endpoints.
+            from src.providers import registry
+            is_subscription = registry.is_codex_url(base)
 
             if model_ids:
                 curated_key = _match_provider_curated(base, None)
@@ -838,6 +842,7 @@ def setup_model_routes(model_discovery):
                     "endpoint_name": ep.name,
                     "category": category,
                     "model_type": ep_model_type,
+                    "is_subscription": is_subscription,
                 })
             else:
                 # Endpoint unreachable but still show it greyed out
@@ -853,6 +858,7 @@ def setup_model_routes(model_discovery):
                     "endpoint_name": ep.name,
                     "category": category,
                     "model_type": ep_model_type,
+                    "is_subscription": is_subscription,
                     "offline": True,
                 })
 
