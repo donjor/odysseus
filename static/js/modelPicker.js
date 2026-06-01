@@ -152,6 +152,7 @@ function _initModelPickerDropdown() {
           url: item.url,
           endpointId: item.endpoint_id,
           epName: item.endpoint_name || '',
+          subscription: !!item.is_subscription,
           stale: isLocalDead,
           staleReason: isLocalDead ? (probeResult.error || 'not responding') : '',
         });
@@ -219,6 +220,13 @@ function _initModelPickerDropdown() {
         badge.textContent = 'offline';
         badge.style.cssText = 'font-size:10px;opacity:0.7;padding:1px 6px;border:1px solid var(--border);border-radius:8px;margin-left:6px;';
         row.appendChild(badge);
+      }
+      if (m.subscription) {
+        const subBadge = document.createElement('span');
+        subBadge.className = 'model-switch-sub-badge';
+        subBadge.textContent = 'subscription';
+        subBadge.title = 'Flat-rate subscription access (no per-token API billing)';
+        row.appendChild(subBadge);
       }
       const epSpan = document.createElement('span');
       epSpan.className = 'model-switch-ep';

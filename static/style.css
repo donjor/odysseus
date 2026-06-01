@@ -34431,3 +34431,16 @@ body.theme-frosted .modal {
 .codex-msg-warn { color: #e0a93b; }
 .codex-msg-err { color: var(--red); }
 
+
+/* Model-picker badge marking a flat-rate subscription (OAuth) endpoint */
+.model-switch-sub-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: #2ecc71;
+  border: 1px solid color-mix(in srgb, #2ecc71 45%, transparent);
+  background: color-mix(in srgb, #2ecc71 12%, transparent);
+}
