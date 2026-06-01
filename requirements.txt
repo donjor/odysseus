@@ -39,3 +39,5 @@ qrcode[pil]
 croniter
 pytest
 pytest-asyncio
+# Mock httpx transport for the codex transport/OAuth tests (test-only).
+respx
