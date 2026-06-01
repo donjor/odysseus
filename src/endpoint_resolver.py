@@ -13,6 +13,8 @@ from urllib.parse import urlparse, urlunparse
 
 from src.database import SessionLocal, ModelEndpoint
 from src.llm_core import _detect_provider
+from src.providers import registry
+from src.providers.endpoint_ref import EndpointRef
 
 logger = logging.getLogger(__name__)
 
@@ -136,14 +138,21 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"}
 
 
-def resolve_endpoint(
+def resolve_endpoint_ref(
     setting_prefix: str,
     fallback_url: Optional[str] = None,
     fallback_model: Optional[str] = None,
     fallback_headers: Optional[Dict] = None,
     owner: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
-    """Resolve an endpoint/model from settings, with fallback.
+) -> EndpointRef:
+    """Canonical resolver: settings/DB/owner selection → `EndpointRef`.
+
+    This is the single source of endpoint selection logic. A resolved endpoint
+    yields a ref carrying IDENTITY (endpoint_id/owner/provider_id/auth_type), so a
+    future OAuth provider can refresh credentials per call. Fallback paths yield a
+    `from_legacy()` ref (static, no identity).
+
+    `resolve_endpoint` materializes the legacy (url, model, headers) tuple from this.
 
     Args:
         setting_prefix: Settings key prefix, e.g. "research", "task", "utility", "default".
@@ -151,15 +160,12 @@ def resolve_endpoint(
         fallback_url:    URL to use if settings are empty or endpoint missing.
         fallback_model:  Model to use if settings are empty.
         fallback_headers: Headers to use if using fallback.
-
-    Returns:
-        (endpoint_url, model, headers) — resolved or fallback values.
     """
     try:
         from src.settings import get_user_setting, load_settings
         settings = load_settings()
     except Exception:
-        return fallback_url, fallback_model, fallback_headers
+        return EndpointRef.from_legacy(fallback_url, fallback_model, fallback_headers)
 
     ep_id = (get_user_setting(f"{setting_prefix}_endpoint_id", owner or "", settings.get(f"{setting_prefix}_endpoint_id", "")) or "").strip()
     model = (get_user_setting(f"{setting_prefix}_model", owner or "", settings.get(f"{setting_prefix}_model", "")) or "").strip()
@@ -181,7 +187,7 @@ def resolve_endpoint(
             model = (get_user_setting("default_model", owner or "", settings.get("default_model", "")) or "").strip()
 
     if not ep_id:
-        return fallback_url, fallback_model, fallback_headers
+        return EndpointRef.from_legacy(fallback_url, fallback_model, fallback_headers)
 
     db = SessionLocal()
     try:
@@ -195,7 +201,7 @@ def resolve_endpoint(
         else:
             ep = ep.first()
         if not ep:
-            return fallback_url, fallback_model, fallback_headers
+            return EndpointRef.from_legacy(fallback_url, fallback_model, fallback_headers)
 
         base = normalize_base(ep.base_url)
         chat_url = build_chat_url(base)
@@ -210,12 +216,39 @@ def resolve_endpoint(
             except Exception:
                 pass
 
-        return chat_url, model or fallback_model, headers
+        spec = registry.detect_spec(chat_url)
+        return EndpointRef(
+            url=chat_url,
+            model=model or fallback_model,
+            headers=headers,
+            endpoint_id=ep_id,
+            owner=owner,
+            provider_id=spec.id,
+            auth_type=spec.auth_type,
+        )
     except Exception as e:
         logger.debug(f"Could not resolve {setting_prefix} endpoint: {e}")
-        return fallback_url, fallback_model, fallback_headers
+        return EndpointRef.from_legacy(fallback_url, fallback_model, fallback_headers)
     finally:
         db.close()
+
+
+def resolve_endpoint(
+    setting_prefix: str,
+    fallback_url: Optional[str] = None,
+    fallback_model: Optional[str] = None,
+    fallback_headers: Optional[Dict] = None,
+    owner: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
+    """Legacy tuple API — materializes `resolve_endpoint_ref()` for the ~37
+    tuple-unpacking call sites. Static-compatible, NOT OAuth-complete (see
+    `EndpointRef.from_legacy`).
+
+    Returns:
+        (endpoint_url, model, headers) — resolved or fallback values.
+    """
+    ref = resolve_endpoint_ref(setting_prefix, fallback_url, fallback_model, fallback_headers, owner)
+    return ref.url, ref.model, ref.headers
 
 
 def resolve_endpoint_by_id(

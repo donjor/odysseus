@@ -206,3 +206,42 @@ class TestRealFirstChatModel:
 
     def test_first_already_chat(self):
         assert _real_er._first_chat_model(["gpt-4o", "text-embedding-ada-002"]) == "gpt-4o"
+
+
+class TestResolveEndpointRefEquivalence:
+    """PR1c: resolve_endpoint_ref() is canonical; resolve_endpoint() materializes
+    the legacy tuple from it. The ~37 tuple-unpack sites must see no change."""
+
+    def test_resolve_endpoint_materializes_ref(self, monkeypatch):
+        from src.providers.endpoint_ref import EndpointRef
+        sentinel = EndpointRef(
+            url="https://x/v1/chat/completions", model="m1",
+            headers={"Authorization": "Bearer k"}, endpoint_id="ep1",
+            owner="o", provider_id="openai", auth_type="api_key",
+        )
+        monkeypatch.setattr(_real_er, "resolve_endpoint_ref", lambda *a, **k: sentinel)
+        assert _real_er.resolve_endpoint("default", fallback_url="fb") == (
+            "https://x/v1/chat/completions", "m1", {"Authorization": "Bearer k"},
+        )
+
+    def test_fallback_path_yields_static_from_legacy_ref(self, monkeypatch):
+        # Force settings load to fail → resolve_endpoint_ref returns a from_legacy ref
+        # (static, no identity), and resolve_endpoint materializes the fallback tuple.
+        import sys
+        import types
+
+        bad = types.ModuleType("src.settings")
+
+        def _boom(*a, **k):
+            raise RuntimeError("no settings")
+
+        bad.load_settings = _boom
+        bad.get_user_setting = _boom
+        monkeypatch.setitem(sys.modules, "src.settings", bad)
+
+        ref = _real_er.resolve_endpoint_ref("default", fallback_url="u", fallback_model="m", fallback_headers={"h": "v"})
+        assert (ref.url, ref.model, ref.headers) == ("u", "m", {"h": "v"})
+        assert ref.endpoint_id is None
+        assert ref.auth_type == "api_key"
+
+        assert _real_er.resolve_endpoint("default", fallback_url="u", fallback_model="m", fallback_headers={"h": "v"}) == ("u", "m", {"h": "v"})

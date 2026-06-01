@@ -8,7 +8,8 @@ import hashlib
 from fastapi import HTTPException
 from typing import Optional, Dict, List
 
-from src.providers import registry
+from src.providers import registry, auth
+from src.providers.endpoint_ref import EndpointRef
 from src.providers.spec import ANTHROPIC_MODELS
 from src.providers.openai_chat import (
     uses_max_completion_tokens as _uses_max_completion_tokens,
@@ -250,8 +251,14 @@ def normalize_model_id(endpoint_url: str, requested: str, timeout: int = LLMConf
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
-    """Synchronous LLM call with optional prompt type enhancement."""
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             ref: Optional[EndpointRef] = None) -> str:
+    """Synchronous LLM call with optional prompt type enhancement.
+
+    `ref` (optional) supersedes url/model/headers with a resolved `EndpointRef`.
+    When omitted, an `EndpointRef.from_legacy(url, model, headers)` is built so
+    behavior is byte-identical for the existing tuple callers.
+    """
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise the transport's h.update() throws "dictionary
     # update sequence element #0 has length 1; 2 is required". Sync-only quirk.
@@ -263,20 +270,25 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     if not isinstance(headers, dict):
         headers = None
 
+    if ref is None:
+        ref = EndpointRef.from_legacy(url, model, headers)
+
     messages_copy = _consolidate_system_messages(messages)
 
-    transport = registry.get_transport_for_url(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    spec = registry.detect_spec(ref.url)
+    transport = registry.get_transport(spec)
+    cache_key = _get_cache_key(ref.url, ref.model, messages_copy, temperature, max_tokens)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
-    target_url = transport.target_url(url)
-    h = transport.build_headers(headers)
-    payload = transport.build_payload(model, messages_copy, temperature, max_tokens)
+    creds = auth.resolve_sync(ref, spec)
+    target_url = transport.target_url(ref.url)
+    h = transport.build_headers(creds.headers)
+    payload = transport.build_payload(ref.model, messages_copy, temperature, max_tokens)
     try:
-        note_model_activity(target_url, model)
+        note_model_activity(target_url, ref.model)
         r = httpx.post(target_url, headers=h, json=payload, timeout=timeout)
     except Exception as e:
         raise HTTPException(502, f"POST {target_url} failed: {e}")
@@ -340,21 +352,31 @@ async def llm_call_async(
     headers: Optional[Dict] = None,
     timeout: int = LLMConfig.STREAM_TIMEOUT,
     max_retries: int = LLMConfig.MAX_RETRIES,
-    prompt_type: Optional[str] = None
+    prompt_type: Optional[str] = None,
+    ref: Optional[EndpointRef] = None,
 ) -> str:
-    """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging.
+
+    `ref` (optional) supersedes url/model/headers; when omitted, built from the
+    legacy tuple so existing callers are byte-identical.
+    """
+    if ref is None:
+        ref = EndpointRef.from_legacy(url, model, headers)
+
     messages_copy = _consolidate_system_messages(messages)
 
-    transport = registry.get_transport_for_url(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    spec = registry.detect_spec(ref.url)
+    transport = registry.get_transport(spec)
+    cache_key = _get_cache_key(ref.url, ref.model, messages_copy, temperature, max_tokens)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
-    target_url = transport.target_url(url)
-    h = transport.build_headers(headers)
-    payload = transport.build_payload(model, messages_copy, temperature, max_tokens)
+    creds = await auth.resolve(ref, spec)
+    target_url = transport.target_url(ref.url)
+    h = transport.build_headers(creds.headers)
+    payload = transport.build_payload(ref.model, messages_copy, temperature, max_tokens)
 
     if _is_host_dead(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
@@ -365,7 +387,7 @@ async def llm_call_async(
         attempt += 1
         start = time.time()
         try:
-            note_model_activity(target_url, model)
+            note_model_activity(target_url, ref.model)
             client = _get_http_client()
             r = await client.post(target_url, headers=h, json=payload, timeout=call_timeout)
             duration = time.time() - start
@@ -401,7 +423,7 @@ async def llm_call_async(
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None):
+                     tools: Optional[List[Dict]] = None, ref: Optional[EndpointRef] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -412,15 +434,20 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
 
     `llm_core` owns the wire (httpx stream lifecycle, cooldown, error mapping); the
     transport's stateful `StreamDecoder` turns each raw SSE line into the normalized
-    chunks above.
+    chunks above. `ref` (optional) supersedes url/model/headers; when omitted it is
+    built from the legacy tuple so existing callers are byte-identical.
     """
+    if ref is None:
+        ref = EndpointRef.from_legacy(url, model, headers)
+
     messages_copy = _consolidate_system_messages(messages)
 
-    spec = registry.detect_spec(url)
+    spec = registry.detect_spec(ref.url)
     transport = registry.get_transport(spec)
-    target_url = transport.target_url(url)
-    h = transport.build_headers(headers)
-    payload = transport.build_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
+    target_url = transport.target_url(ref.url)
+    creds = await auth.resolve(ref, spec)
+    h = transport.build_headers(creds.headers)
+    payload = transport.build_payload(ref.model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
 
     # Short connect timeout: a reachable peer answers SYN in <100ms even on
     # Tailscale. 3s is plenty; 30s let one dead upstream wedge the UI.
@@ -429,9 +456,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     if _is_host_dead(target_url):
         yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
         return
-    note_model_activity(target_url, model)
+    note_model_activity(target_url, ref.model)
 
-    decoder = transport.stream_decoder(model)
+    decoder = transport.stream_decoder(ref.model)
     try:
         client = _get_http_client()
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
