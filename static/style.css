@@ -34444,3 +34444,12 @@ body.theme-frosted .modal {
   border: 1px solid color-mix(in srgb, #2ecc71 45%, transparent);
   background: color-mix(in srgb, #2ecc71 12%, transparent);
 }
+
+/* Lightweight "(sub)" marker — collapsed model picker label + inline chat role.
+   Same green subscription signal as .model-switch-sub-badge, minus the pill. */
+.model-sub-inline {
+  font-size: 0.82em;
+  font-weight: 500;
+  color: #2ecc71;
+  opacity: 0.9;
+}

@@ -487,9 +487,21 @@ export function updateModelPicker() {
 
   const displayName = modelId ? modelId.split('/').pop() : 'Select model';
   const logo = modelId ? providerLogo(modelId) : null;
+  // providerLogo() returns a trusted SVG string; the model name is appended as
+  // a text node so it can never be parsed as markup.
   if (logo) {
-    label.innerHTML = '<span class="model-picker-logo">' + logo + '</span> ' + displayName;
+    label.innerHTML = '<span class="model-picker-logo">' + logo + '</span> ';
+    label.appendChild(document.createTextNode(displayName));
   } else {
     label.textContent = displayName;
+  }
+  const endpointUrl = (s && s.endpoint_url) || (_pendingChat && _pendingChat.url) || '';
+  if (modelId && window.modelsModule && window.modelsModule.isSubscriptionModel
+      && window.modelsModule.isSubscriptionModel(modelId, endpointUrl)) {
+    label.appendChild(document.createTextNode(' '));
+    const subTag = document.createElement('span');
+    subTag.className = 'model-sub-inline';
+    subTag.textContent = '(sub)';
+    label.appendChild(subTag);
   }
 }

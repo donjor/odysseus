@@ -1866,6 +1866,21 @@ export function displayMetrics(messageElement, metrics) {
 /**
  * Add a message to the chat history.
  */
+/**
+ * Append a small "(sub)" marker to a role element when the model is served by
+ * a flat-rate subscription endpoint. Mirrors the model-picker marker so the
+ * subscription signal reads the same in the picker and inline in chat.
+ */
+function appendSubTag(roleEl, model, url) {
+  if (!roleEl || !model) return;
+  const m = window.modelsModule;
+  if (!m || !m.isSubscriptionModel || !m.isSubscriptionModel(model, url || '')) return;
+  const tag = document.createElement('span');
+  tag.className = 'model-sub-inline';
+  tag.textContent = '(sub)';
+  roleEl.appendChild(tag);
+}
+
 export function addMessage(role, content, modelName, metadata) {
   try {
     hideWelcomeScreen();
@@ -1904,6 +1919,7 @@ export function addMessage(role, content, modelName, metadata) {
           const contModel = modelName || metadata?.model;
           roleEl.textContent = shortModel(contModel);
           applyModelColor(roleEl, contModel);
+          appendSubTag(roleEl, contModel, metadata?.endpoint_url);
           if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
           const body = document.createElement('div');
@@ -2013,7 +2029,10 @@ export function addMessage(role, content, modelName, metadata) {
     }
     r.textContent = _roleText;
     if (role !== 'user') {
-      if (!isSlash && !isCompacted) applyModelColor(r, resolvedModel);
+      if (!isSlash && !isCompacted) {
+        applyModelColor(r, resolvedModel);
+        appendSubTag(r, resolvedModel, metadata?.endpoint_url);
+      }
       r.appendChild(roleTimestamp(metadata?.timestamp));
     }
 
