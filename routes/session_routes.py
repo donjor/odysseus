@@ -328,6 +328,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             model=model_to_use,
             rag=str(rag).lower() == "true" if rag else False,
             owner=user,
+            endpoint_id=(endpoint_id.strip() or None) if endpoint_id else None,
         )
         # Set auth headers for custom API-key endpoints
         resolved_key = request_api_key
@@ -384,6 +385,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 db.close()
         # Switch model/endpoint mid-session
         if model is not None and endpoint_url is not None:
+            endpoint_id = (endpoint_id.strip() or None) if endpoint_id else None
             user = get_current_user(request)
             _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
             endpoint_api_key = ""
@@ -410,6 +412,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                     _db.close()
             session.model = model
             session.endpoint_url = endpoint_url
+            session.endpoint_id = endpoint_id
             # Update auth headers from the endpoint's stored API key
             if endpoint_api_key:
                 from src.endpoint_resolver import build_headers
@@ -424,6 +427,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                     db_session.model = model
                     db_session.endpoint_url = endpoint_url
                     db_session.headers = session.headers or {}
+                    db_session.endpoint_id = endpoint_id
                     db_session.updated_at = datetime.utcnow()
                     db.commit()
             finally:
