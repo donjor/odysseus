@@ -632,11 +632,9 @@ export function applyModelColor(roleEl, modelName) {
       setTimeout(() => document.addEventListener('click', closePopup, true), 0);
     });
   }
-  // Subscription marker — a small "(sub)" right after the model name, for
-  // flat-rate (e.g. ChatGPT-sub) endpoints. Folded in here because every role
-  // render (streaming, agent, group, history rebuild) calls applyModelColor —
-  // this is the one shared chokepoint, so the marker can't drift per-path.
-  // Insert before any inline timestamp; idempotent against repeated calls.
+  // Subscription "(sub)" marker, right after the model name. Folded in here
+  // because every role render (streaming, agent, group, history) calls
+  // applyModelColor — the one shared chokepoint. Idempotent; sits before any timestamp.
   if (!roleEl.querySelector('.model-sub-inline')
       && window.modelsModule && window.modelsModule.isSubscriptionModel
       && window.modelsModule.isSubscriptionModel(modelName, '')) {
