@@ -224,6 +224,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             model=model_to_use,
             rag=str(rag).lower() == "true" if rag else False,
             owner=user,
+            endpoint_id=(endpoint_id.strip() or None) if endpoint_id else None,
         )
         # Set auth headers for custom API-key endpoints
         resolved_key = api_key.strip() if api_key else ""
@@ -298,6 +299,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                     _db.close()
             session.model = model
             session.endpoint_url = endpoint_url
+            session.endpoint_id = endpoint_id.strip() if endpoint_id else None
             # Update auth headers from the endpoint's stored API key
             if endpoint_id:
                 _db = SessionLocal()
@@ -315,6 +317,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 if db_session:
                     db_session.model = model
                     db_session.endpoint_url = endpoint_url
+                    db_session.endpoint_id = endpoint_id.strip() if endpoint_id else None
                     db_session.updated_at = datetime.utcnow()
                     db.commit()
             finally:
