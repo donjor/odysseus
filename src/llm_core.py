@@ -278,7 +278,10 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     spec = registry.detect_spec(ref.url)
     transport = registry.get_transport(spec)
     cache_key = _get_cache_key(ref.url, ref.model, messages_copy, temperature, max_tokens)
-    cached_response = _get_cached_response(cache_key)
+    # OAuth providers (codex) share url+model across users, so a shared response
+    # cache could cross-serve one user's answer to another. Bypass it for them.
+    use_cache = spec.auth_type != "oauth"
+    cached_response = _get_cached_response(cache_key) if use_cache else None
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
@@ -297,7 +300,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     data = r.json()
     try:
         response = transport.parse_response(data)
-        _set_cached_response(cache_key, response)
+        if use_cache:
+            _set_cached_response(cache_key, response)
         return response
     except Exception:
         raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
@@ -383,7 +387,10 @@ async def llm_call_async(
     spec = registry.detect_spec(ref.url)
     transport = registry.get_transport(spec)
     cache_key = _get_cache_key(ref.url, ref.model, messages_copy, temperature, max_tokens)
-    cached_response = _get_cached_response(cache_key)
+    # OAuth providers (codex) share url+model across users, so a shared response
+    # cache could cross-serve one user's answer to another. Bypass it for them.
+    use_cache = spec.auth_type != "oauth"
+    cached_response = _get_cached_response(cache_key) if use_cache else None
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
@@ -418,7 +425,8 @@ async def llm_call_async(
             data = r.json()
             try:
                 response = transport.parse_response(data)
-                _set_cached_response(cache_key, response)
+                if use_cache:
+                    _set_cached_response(cache_key, response)
                 return response
             except Exception:
                 raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")

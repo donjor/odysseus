@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ID = "openai-codex"
 DEFAULT_ENDPOINT_NAME = "ChatGPT (Codex)"
-# Provisional curated model list so the endpoint is usable without probing the
-# (chat-incompatible) backend. TODO(2b): own this in OPENAI_CODEX_SPEC.
-CODEX_MODELS = ["gpt-5.4", "gpt-5.3-codex"]
+# Curated model list (the codex backend has no chat-compatible /models probe).
+# Owned by the provider spec; imported here so the endpoint is usable on connect.
+from src.providers.spec import CODEX_MODELS
 
 # Keep strong refs to in-flight poll tasks so they aren't GC'd mid-flight.
 _BG_TASKS: set[asyncio.Task] = set()

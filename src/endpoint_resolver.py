@@ -329,6 +329,17 @@ def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) 
         if not isinstance(entry, dict):
             continue
         resolved = resolve_endpoint_by_id(entry.get("endpoint_id", ""), entry.get("model", ""))
-        if resolved:
-            out.append(resolved)
+        if not resolved:
+            continue
+        # OAuth endpoints (codex) can't ride the static (url, model, headers) tuple
+        # path — their bearer needs per-call refresh via an EndpointRef. Exclude them
+        # as fallback candidates until ref-backed fallbacks land (PR3); otherwise a
+        # codex fallback would 401 the moment its token expired.
+        try:
+            from src.providers import registry as _registry
+            if _registry.detect_spec(resolved[0]).auth_type == "oauth":
+                continue
+        except Exception:
+            pass
+        out.append(resolved)
     return out

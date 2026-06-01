@@ -7,6 +7,7 @@ underscored names for the ~19 call sites that import them.
 from urllib.parse import urlparse
 
 from src.providers.anthropic_messages import AnthropicMessagesTransport
+from src.providers.codex_responses import CodexResponsesTransport
 from src.providers.openai_chat import OpenAIChatTransport
 from src.providers.spec import BUILTIN_SPECS, OPENAI_SPEC, ProviderSpec
 
@@ -14,6 +15,7 @@ from src.providers.spec import BUILTIN_SPECS, OPENAI_SPEC, ProviderSpec
 _TRANSPORTS = {
     "openai_chat": OpenAIChatTransport(),
     "anthropic_messages": AnthropicMessagesTransport(),
+    "codex_responses": CodexResponsesTransport(),
 }
 
 

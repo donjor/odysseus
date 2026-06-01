@@ -44,6 +44,22 @@ ANTHROPIC_SPEC = ProviderSpec(
     model_list_mode="static",
 )
 
+# Curated codex model list (ChatGPT-subscription; no public /models probe). Tracked
+# against upstream — see the grey-area posture in the PR2 plan.
+CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"]
+
+# ChatGPT-subscription provider: the codex Responses backend behind an OAuth
+# session. URL-matched on the distinctive backend path; never the default.
+OPENAI_CODEX_SPEC = ProviderSpec(
+    id="openai-codex",
+    label="ChatGPT (Codex)",
+    transport="codex_responses",
+    auth_type="oauth",
+    url_matchers=("chatgpt.com/backend-api/codex",),
+    default_chat_path="/responses",
+    model_list_mode="static",
+)
+
 # The default/fallthrough provider: any OpenAI-compatible host (OpenAI, xAI, Groq,
 # OpenRouter, local Ollama/vLLM, …). Empty matchers → only selected as the default.
 OPENAI_SPEC = ProviderSpec(
@@ -57,4 +73,4 @@ OPENAI_SPEC = ProviderSpec(
 )
 
 # Order matters: specific matchers first, the empty-matcher default last.
-BUILTIN_SPECS = (ANTHROPIC_SPEC, OPENAI_SPEC)
+BUILTIN_SPECS = (ANTHROPIC_SPEC, OPENAI_CODEX_SPEC, OPENAI_SPEC)
