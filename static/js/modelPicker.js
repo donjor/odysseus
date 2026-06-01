@@ -224,7 +224,7 @@ function _initModelPickerDropdown() {
       if (m.subscription) {
         const subBadge = document.createElement('span');
         subBadge.className = 'model-switch-sub-badge';
-        subBadge.textContent = 'subscription';
+        subBadge.textContent = 'sub';
         subBadge.title = 'Flat-rate subscription access (no per-token API billing)';
         row.appendChild(subBadge);
       }
