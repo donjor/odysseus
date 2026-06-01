@@ -8,7 +8,33 @@ import hashlib
 from fastapi import HTTPException
 from typing import Optional, Dict, List
 
+from src.providers import registry
+from src.providers.spec import ANTHROPIC_MODELS
+from src.providers.openai_chat import (
+    uses_max_completion_tokens as _uses_max_completion_tokens,
+    supports_thinking as _supports_thinking,
+)
+from src.providers.anthropic_messages import (
+    convert_openai_content_to_anthropic as _convert_openai_content_to_anthropic,
+    build_anthropic_payload as _build_anthropic_payload,
+    build_anthropic_headers as _build_anthropic_headers,
+    parse_anthropic_response as _parse_anthropic_response,
+    normalize_anthropic_url as _normalize_anthropic_url,
+)
+
 logger = logging.getLogger(__name__)
+
+# ── Provider framework seam ──
+# Provider identity + the de-facto OpenAI/Anthropic transports now live in
+# `src/providers/`. `llm_core` stays the execution engine: it owns the httpx
+# pool, response cache, per-host dead-host cooldown, retry, and fallback, and
+# dispatches request shaping / response parsing / stream decoding to transports.
+# The names below are re-exported so the ~19 modules that import them from
+# `src.llm_core` (endpoint_resolver, ai_interaction, model_routes, email_*, …)
+# keep working unchanged.
+_detect_provider = registry.detect_provider
+_provider_label = registry.provider_label
+
 
 class LLMConfig:
     """Configuration constants for LLM operations."""
@@ -21,17 +47,17 @@ class LLMConfig:
 
 
 # Cache for LLM responses
-def _get_cache_key(url: str, model: str, messages: List[Dict], 
+def _get_cache_key(url: str, model: str, messages: List[Dict],
                    temperature: float, max_tokens: int) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
         sorted_items = tuple(sorted(msg.items()))
         hashable_messages.append(sorted_items)
-    
+
     content = json.dumps({
         'url': url,
-        'model': model, 
+        'model': model,
         'messages': hashable_messages,
         'temp': temperature,
         'max_tokens': max_tokens
@@ -132,42 +158,6 @@ def _set_cached_response(cache_key: str, response: str) -> None:
             del _response_cache[key]
     _response_cache[cache_key] = response
 
-# ── Anthropic native API adapter ──
-
-ANTHROPIC_MODELS = [
-    "claude-opus-4-20250514", "claude-opus-4",
-    "claude-sonnet-4-20250514", "claude-sonnet-4", "claude-sonnet-4-5-20250929", "claude-sonnet-4-5",
-    "claude-haiku-4-20250514", "claude-haiku-4", "claude-haiku-3-5-20241022", "claude-haiku-3-5",
-]
-
-def _detect_provider(url: str) -> str:
-    """Detect API provider from URL."""
-    if "anthropic.com" in (url or ""):
-        return "anthropic"
-    return "openai"
-
-
-def _provider_label(url: str) -> str:
-    """Human-friendly provider name for error messages."""
-    u = (url or "").lower()
-    if "anthropic.com" in u: return "Anthropic"
-    if "api.x.ai" in u or "x.ai/" in u: return "xAI"
-    if "openai.com" in u: return "OpenAI"
-    if "openrouter.ai" in u: return "OpenRouter"
-    if "groq.com" in u: return "Groq"
-    if "mistral.ai" in u: return "Mistral"
-    if "deepseek.com" in u: return "DeepSeek"
-    if "googleapis.com" in u or "generativelanguage" in u: return "Google"
-    if "together.xyz" in u or "together.ai" in u: return "Together"
-    if "fireworks.ai" in u: return "Fireworks"
-    if "localhost" in u or "127.0.0.1" in u: return "local endpoint"
-    try:
-        from urllib.parse import urlparse
-        host = urlparse(url).hostname or "provider"
-        return host
-    except Exception:
-        return "provider"
-
 
 def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
     """Turn an upstream HTTP error into a user-readable sentence.
@@ -210,160 +200,25 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
         return f"{provider} is having an outage (HTTP {status})." + (f" {detail}" if detail else "")
     return f"{provider} returned HTTP {status}" + (f": {detail}" if detail else "")
 
-# Models that require max_completion_tokens instead of max_tokens
-_MAX_COMPLETION_TOKENS_MODELS = {"o1", "o3", "o4", "gpt-4.5", "gpt-5"}
 
-def _uses_max_completion_tokens(model: str) -> bool:
-    """Check if a model requires max_completion_tokens instead of max_tokens."""
-    if not model:
-        return False
-    m = model.lower()
-    return any(m.startswith(p) or f"/{p}" in m for p in _MAX_COMPLETION_TOKENS_MODELS)
+def _consolidate_system_messages(messages: List[Dict]) -> List[Dict]:
+    """Copy messages and merge all system messages into a single one at the start.
 
-# Models that support structured thinking — may output </think> without opening tag
-_THINKING_MODEL_PATTERNS = ("qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "minimax", "m2-reap")
-
-def _supports_thinking(model: str) -> bool:
-    """Check if model supports structured thinking output."""
-    if not model:
-        return False
-    m = model.lower()
-    return any(p in m for p in _THINKING_MODEL_PATTERNS)
-
-def _convert_openai_content_to_anthropic(content):
-    """Convert OpenAI multimodal content blocks to Anthropic format.
-
-    Converts image_url blocks (data URI) → Anthropic image blocks.
-    Passes text blocks through unchanged.
+    Some models (e.g. Qwen3.5) reject system messages that aren't first. Shared by
+    every entry fn so the request the transport sees is identical across them.
     """
-    if not isinstance(content, list):
-        return content
-    converted = []
-    for block in content:
-        if not isinstance(block, dict):
-            converted.append(block)
-            continue
-        if block.get("type") == "image_url":
-            url = (block.get("image_url") or {}).get("url", "")
-            # Parse data URI: data:image/<fmt>;base64,<data>
-            if url.startswith("data:"):
-                try:
-                    header, b64_data = url.split(",", 1)
-                    media_type = header.split(";")[0].replace("data:", "")
-                except (ValueError, IndexError):
-                    continue
-                converted.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": b64_data,
-                    },
-                })
-            else:
-                # External URL — use Anthropic's URL source
-                converted.append({
-                    "type": "image",
-                    "source": {"type": "url", "url": url},
-                })
-        elif block.get("type") == "text":
-            converted.append(block)
-        else:
-            converted.append(block)
-    return converted
-
-
-def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=False, tools=None):
-    """Convert OpenAI-style messages to Anthropic format."""
-    system_parts = []
-    chat_messages = []
-    for m in messages:
+    messages_copy = [msg.copy() for msg in messages]
+    sys_parts = []
+    non_sys = []
+    for m in messages_copy:
         if m.get("role") == "system":
-            system_parts.append(m["content"])
-        elif m.get("role") == "tool":
-            # Convert OpenAI tool result to Anthropic format
-            chat_messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": m.get("tool_call_id", ""),
-                    "content": m.get("content", ""),
-                }],
-            })
-        elif m.get("role") == "assistant" and isinstance(m.get("tool_calls"), list):
-            # Convert OpenAI assistant tool_calls to Anthropic format
-            content = []
-            if m.get("content"):
-                content.append({"type": "text", "text": m["content"]})
-            for tc in m["tool_calls"]:
-                fn = tc.get("function", {})
-                args_str = fn.get("arguments", "{}")
-                try:
-                    args = json.loads(args_str) if isinstance(args_str, str) else args_str
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-                content.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", ""),
-                    "name": fn.get("name", ""),
-                    "input": args,
-                })
-            chat_messages.append({"role": "assistant", "content": content})
+            sys_parts.append(m["content"])
         else:
-            # Convert multimodal content (image_url → image) for Anthropic
-            content = _convert_openai_content_to_anthropic(m["content"])
-            chat_messages.append({"role": m["role"], "content": content})
-    payload = {
-        "model": model,
-        "messages": chat_messages,
-        "max_tokens": max_tokens if max_tokens and max_tokens > 0 else 4096,
-        "temperature": temperature,
-    }
-    if system_parts:
-        payload["system"] = "\n\n".join(system_parts)
-    if stream:
-        payload["stream"] = True
-    # Convert OpenAI-format tools to Anthropic format
-    if tools:
-        anthropic_tools = []
-        for t in tools:
-            if t.get("type") == "function":
-                fn = t["function"]
-                anthropic_tools.append({
-                    "name": fn["name"],
-                    "description": fn.get("description", ""),
-                    "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
-                })
-        if anthropic_tools:
-            payload["tools"] = anthropic_tools
-    return payload
+            non_sys.append(m)
+    if sys_parts:
+        return [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
+    return non_sys
 
-def _build_anthropic_headers(headers):
-    """Convert Bearer auth to x-api-key for Anthropic."""
-    h = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
-    if headers:
-        for k, v in headers.items():
-            if k.lower() == "authorization" and isinstance(v, str) and v.startswith("Bearer "):
-                h["x-api-key"] = v[7:]
-            else:
-                h[k] = v
-    return h
-
-def _parse_anthropic_response(data: dict) -> str:
-    """Extract text from Anthropic response."""
-    for block in data.get("content", []):
-        if block.get("type") == "text":
-            return block.get("text", "")
-    return ""
-
-def _normalize_anthropic_url(url: str) -> str:
-    """Ensure Anthropic URL points to /v1/messages."""
-    url = url.rstrip("/")
-    if url.endswith("/v1/messages"):
-        return url
-    if url.endswith("/v1"):
-        return url + "/messages"
-    return url + "/v1/messages"
 
 def list_model_ids(base_chat_url: str, timeout: int = LLMConfig.DEFAULT_TIMEOUT, headers: Optional[Dict] = None) -> List[str]:
     """List available model IDs from an endpoint."""
@@ -394,57 +249,32 @@ def normalize_model_id(endpoint_url: str, requested: str, timeout: int = LLMConf
     return None
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
+             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
-    h = {"Content-Type": "application/json"}
     # Tolerate headers that arrive as a JSON string (some sessions stored them
-    # double-encoded) — otherwise h.update() throws "dictionary update sequence
-    # element #0 has length 1; 2 is required".
+    # double-encoded) — otherwise the transport's h.update() throws "dictionary
+    # update sequence element #0 has length 1; 2 is required". Sync-only quirk.
     if isinstance(headers, str):
         try:
             headers = json.loads(headers)
         except Exception:
             headers = None
-    if isinstance(headers, dict):
-        h.update(headers)
+    if not isinstance(headers, dict):
+        headers = None
 
-    messages_copy = [msg.copy() for msg in messages]
+    messages_copy = _consolidate_system_messages(messages)
 
-    # Consolidate multiple system messages into one at the start.
-    sys_parts = []
-    non_sys = []
-    for m in messages_copy:
-        if m.get("role") == "system":
-            sys_parts.append(m["content"])
-        else:
-            non_sys.append(m)
-    if sys_parts:
-        messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
-    else:
-        messages_copy = non_sys
-
-    provider = _detect_provider(url)
+    transport = registry.get_transport_for_url(url)
     cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
-    if provider == "anthropic":
-        target_url = _normalize_anthropic_url(url)
-        h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens)
-    else:
-        target_url = url
-        payload = {
-            "model": model,
-            "messages": messages_copy,
-            "temperature": temperature,
-        }
-        if max_tokens and max_tokens > 0:
-            tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
+    target_url = transport.target_url(url)
+    h = transport.build_headers(headers)
+    payload = transport.build_payload(model, messages_copy, temperature, max_tokens)
     try:
         note_model_activity(target_url, model)
         r = httpx.post(target_url, headers=h, json=payload, timeout=timeout)
@@ -454,10 +284,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         raise HTTPException(502, f"Upstream {target_url} -> {r.status_code}: {r.text}")
     data = r.json()
     try:
-        if provider == "anthropic":
-            response = _parse_anthropic_response(data)
-        else:
-            response = data["choices"][0]["message"]["content"]
+        response = transport.parse_response(data)
         _set_cached_response(cache_key, response)
         return response
     except Exception:
@@ -516,45 +343,18 @@ async def llm_call_async(
     prompt_type: Optional[str] = None
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
-    provider = _detect_provider(url)
-    messages_copy = [msg.copy() for msg in messages]
+    messages_copy = _consolidate_system_messages(messages)
 
-    # Consolidate multiple system messages into one at the start.
-    sys_parts = []
-    non_sys = []
-    for m in messages_copy:
-        if m.get("role") == "system":
-            sys_parts.append(m["content"])
-        else:
-            non_sys.append(m)
-    if sys_parts:
-        messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
-    else:
-        messages_copy = non_sys
-
+    transport = registry.get_transport_for_url(url)
     cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
-    if provider == "anthropic":
-        target_url = _normalize_anthropic_url(url)
-        h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens)
-    else:
-        target_url = url
-        h = {"Content-Type": "application/json"}
-        if headers:
-            h.update(headers)
-        payload = {
-            "model": model,
-            "messages": messages_copy,
-            "temperature": temperature,
-        }
-        if max_tokens and max_tokens > 0:
-            tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
+    target_url = transport.target_url(url)
+    h = transport.build_headers(headers)
+    payload = transport.build_payload(model, messages_copy, temperature, max_tokens)
 
     if _is_host_dead(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
@@ -580,10 +380,7 @@ async def llm_call_async(
             _clear_host_dead(target_url)
             data = r.json()
             try:
-                if provider == "anthropic":
-                    response = _parse_anthropic_response(data)
-                else:
-                    response = data["choices"][0]["message"]["content"]
+                response = transport.parse_response(data)
                 _set_cached_response(cache_key, response)
                 return response
             except Exception:
@@ -612,45 +409,18 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
       - data: {"type": "tool_calls", ...}  — accumulated native tool calls (before DONE)
       - event: error                       — errors
       - data: [DONE]                       — end of stream
+
+    `llm_core` owns the wire (httpx stream lifecycle, cooldown, error mapping); the
+    transport's stateful `StreamDecoder` turns each raw SSE line into the normalized
+    chunks above.
     """
-    provider = _detect_provider(url)
-    messages_copy = [msg.copy() for msg in messages]
+    messages_copy = _consolidate_system_messages(messages)
 
-    # Consolidate multiple system messages into one at the start.
-    # Some models (e.g. Qwen3.5) reject system messages that aren't first.
-    sys_parts = []
-    non_sys = []
-    for m in messages_copy:
-        if m.get("role") == "system":
-            sys_parts.append(m["content"])
-        else:
-            non_sys.append(m)
-    if sys_parts:
-        messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
-    else:
-        messages_copy = non_sys
-
-    if provider == "anthropic":
-        target_url = _normalize_anthropic_url(url)
-        h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
-    else:
-        target_url = url
-        payload = {
-            "model": model,
-            "messages": messages_copy,
-            "temperature": temperature,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if max_tokens and max_tokens > 0:
-            tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
-        if tools:
-            payload["tools"] = tools
-        h = {"Content-Type": "application/json"}
-        if headers:
-            h.update(headers)
+    spec = registry.detect_spec(url)
+    transport = registry.get_transport(spec)
+    target_url = transport.target_url(url)
+    h = transport.build_headers(headers)
+    payload = transport.build_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
 
     # Short connect timeout: a reachable peer answers SYN in <100ms even on
     # Tailscale. 3s is plenty; 30s let one dead upstream wedge the UI.
@@ -661,114 +431,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         return
     note_model_activity(target_url, model)
 
-    # ── Anthropic streaming ──
-    if provider == "anthropic":
-        _anth_input_tokens = 0
-        _anth_output_tokens = 0
-        # Track tool_use blocks: {index: {id, name, arguments_json}}
-        _anth_tool_blocks: Dict[int, Dict] = {}
-        _anth_block_idx = -1
-        _anth_block_type = ""
-        try:
-            client = _get_http_client()
-            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
-                _clear_host_dead(target_url)
-                if r.status_code != 200:
-                    raw = (await r.aread()).decode(errors="replace")
-                    friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
-                    return
-                async for line in r.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:].strip()
-                    if not data or not data.startswith("{"):
-                        continue
-                    try:
-                        j = json.loads(data)
-                        evt = j.get("type", "")
-                        if evt == "content_block_start":
-                            _anth_block_idx = j.get("index", _anth_block_idx + 1)
-                            cb = j.get("content_block", {})
-                            _anth_block_type = cb.get("type", "text")
-                            if _anth_block_type == "tool_use":
-                                _anth_tool_blocks[_anth_block_idx] = {
-                                    "id": cb.get("id", f"call_{_anth_block_idx}"),
-                                    "name": cb.get("name", ""),
-                                    "arguments": "",
-                                }
-                        elif evt == "content_block_delta":
-                            delta = j.get("delta", {})
-                            delta_type = delta.get("type", "")
-                            if delta_type == "text_delta":
-                                text = delta.get("text", "")
-                                if text:
-                                    yield f'data: {json.dumps({"delta": text})}\n\n'
-                            elif delta_type == "input_json_delta":
-                                # Accumulate tool arguments JSON
-                                idx = j.get("index", _anth_block_idx)
-                                if idx in _anth_tool_blocks:
-                                    partial = delta.get("partial_json", "")
-                                    _anth_tool_blocks[idx]["arguments"] += partial
-                                    # Stream tool arg deltas for doc tools
-                                    if partial and _anth_tool_blocks[idx].get("name") in ("create_document", "update_document", "edit_document"):
-                                        yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _anth_tool_blocks[idx]["name"], "arg_delta": partial})}\n\n'
-                        elif evt == "message_start":
-                            _anth_input_tokens = j.get("message", {}).get("usage", {}).get("input_tokens", 0)
-                        elif evt == "message_delta":
-                            _anth_output_tokens = j.get("usage", {}).get("output_tokens", 0)
-                        elif evt == "message_stop":
-                            # Emit accumulated tool calls in OpenAI-compatible format
-                            if _anth_tool_blocks:
-                                calls = []
-                                for idx in sorted(_anth_tool_blocks):
-                                    tb = _anth_tool_blocks[idx]
-                                    calls.append({
-                                        "id": tb["id"],
-                                        "name": tb["name"],
-                                        "arguments": tb["arguments"],
-                                    })
-                                yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
-                            if _anth_input_tokens or _anth_output_tokens:
-                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
-                            yield "data: [DONE]\n\n"
-                            return
-                        elif evt == "error":
-                            err_msg = j.get("error", {}).get("message", "Unknown error")
-                            yield f'event: error\ndata: {json.dumps({"error": err_msg, "status": 400})}\n\n'
-                            return
-                    except json.JSONDecodeError:
-                        continue
-                yield "data: [DONE]\n\n"
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            _cooled = _mark_host_dead(target_url)
-            _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
-        except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
-        except Exception as e:
-            logger.error(f"Anthropic stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
-        return
-
-    # ── OpenAI-compatible streaming ──
-    # Accumulate native tool_calls across streaming chunks
-    _tc_acc: Dict[int, Dict] = {}  # index -> {id, name, arguments}
-    # For thinking models: prepend <think> to first content delta so frontend
-    # can detect thinking-in-progress (some models output </think> but no <think>)
-    _thinking_model = _supports_thinking(model)
-    _first_content_sent = False
-
-    def _emit_tool_calls():
-        """Build the tool_calls event string if any were accumulated."""
-        if not _tc_acc:
-            return None
-        calls = [_tc_acc[i] for i in sorted(_tc_acc)]
-        return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
-
+    decoder = transport.stream_decoder(model)
     try:
         client = _get_http_client()
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -778,90 +441,26 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                 friendly = _format_upstream_error(r.status_code, raw, target_url)
                 yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                 return
-
             async for line in r.aiter_lines():
-                if not line:
-                    continue
-
-                if line.startswith("data: "):
-                    data = line[6:].strip()
-                    if data == "[DONE]":
-                        tc_event = _emit_tool_calls()
-                        if tc_event:
-                            yield tc_event
-                        yield "data: [DONE]\n\n"
-                        return
-
-                    try:
-                        if data.strip():
-                            if data.startswith("{"):
-                                j = json.loads(data)
-                                # Usage chunk (from stream_options)
-                                _choices = j.get("choices") or []
-                                _delta0 = _choices[0].get("delta") if _choices else None
-                                if "usage" in j and _delta0 in (None, {}, {"content": None}):
-                                    u = j["usage"]
-                                    yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}})}\n\n'
-                                elif "choices" in j:
-                                    delta = j["choices"][0].get("delta", {})
-                                    if isinstance(delta, dict):
-                                        # Text content
-                                        # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1)
-                                        reasoning = delta.get("reasoning_content", "")
-                                        if reasoning:
-                                            yield f'data: {json.dumps({"delta": reasoning, "thinking": True})}\n\n'
-                                        content = delta.get("content", "")
-                                        if content:
-                                            # Some thinking backends start normal content with a
-                                            # stray closing tag. Repair only that shape; do not
-                                            # wrap every first token for model families like
-                                            # MiniMax, which often stream ordinary answers.
-                                            if _thinking_model and not _first_content_sent and content.lstrip().lower().startswith("</think"):
-                                                content = "<think>" + content
-                                            _first_content_sent = True
-                                            yield f'data: {json.dumps({"delta": content})}\n\n'
-                                        # Native tool calls — accumulate across chunks
-                                        for tc in delta.get("tool_calls", []):
-                                            idx = tc.get("index", 0)
-                                            if idx not in _tc_acc:
-                                                _tc_acc[idx] = {"id": "", "name": "", "arguments": ""}
-                                            if tc.get("id"):
-                                                _tc_acc[idx]["id"] = tc["id"]
-                                            func = tc.get("function", {})
-                                            if func.get("name"):
-                                                _tc_acc[idx]["name"] = func["name"]
-                                            if "arguments" in func:
-                                                _tc_acc[idx]["arguments"] += func["arguments"]
-                                                # Stream tool arg deltas for doc tools
-                                                if func["arguments"] and _tc_acc[idx].get("name") in ("create_document", "update_document", "edit_document"):
-                                                    yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
-                                elif "text" in j:
-                                    if j["text"]:
-                                        yield f'data: {json.dumps({"delta": j["text"]})}\n\n'
-                            else:
-                                if data.strip():
-                                    yield f'data: {json.dumps({"delta": data})}\n\n'
-                    except Exception as e:
-                        logger.error(f"Error parsing stream data: {e}")
-                        continue
-
-            # End of stream (no explicit [DONE] received)
-            tc_event = _emit_tool_calls()
-            if tc_event:
-                yield tc_event
-            yield "data: [DONE]\n\n"
-
+                chunks, stop = decoder.decode_line(line)
+                for chunk in chunks:
+                    yield chunk
+                if stop:
+                    return
+            # End of stream (no explicit terminal event received)
+            for chunk in decoder.finalize():
+                yield chunk
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         _cooled = _mark_host_dead(target_url)
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-        logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
+        logger.warning(f"{spec.id} stream connect to {target_url} failed: {e}{_tail}")
         yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
     except httpx.ReadTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
     except httpx.NetworkError:
         yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
     except Exception as e:
-        logger.error(f"Stream error: {e}")
+        logger.error(f"{spec.id} stream error: {e}")
         yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
 
 
